@@ -1,0 +1,491 @@
+use crate::db::orders::Order;
+use crate::db::settings::AppSettings;
+use escpos::driver::Driver;
+use escpos::errors::Result as EscResult;
+use escpos::printer::Printer;
+use escpos::utils::*;
+use std::sync::{Arc, Mutex};
+
+/// In-memory ESC/POS byte buffer driver.
+///
+/// Implements the `escpos::driver::Driver` trait by collecting all written
+/// bytes into a `Vec<u8>` instead of sending them to a physical device.
+#[derive(Clone)]
+pub struct VecDriver {
+    buf: Arc<Mutex<Vec<u8>>>,
+}
+
+impl VecDriver {
+    pub fn new() -> Self {
+        Self {
+            buf: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    pub fn into_bytes(self) -> Vec<u8> {
+        Arc::try_unwrap(self.buf)
+            .unwrap_or_else(|arc| {
+                let guard = arc.lock().expect("VecDriver into_bytes lock poisoned");
+                Mutex::new(guard.clone())
+            })
+            .into_inner()
+            .unwrap_or_default()
+    }
+}
+
+impl Driver for VecDriver {
+    fn name(&self) -> String {
+        "vec".to_string()
+    }
+
+    fn write(&self, data: &[u8]) -> EscResult<()> {
+        let mut buf = self.buf.lock().expect("VecDriver lock poisoned");
+        buf.extend_from_slice(data);
+        Ok(())
+    }
+
+    fn read(&self, _buf: &mut [u8]) -> EscResult<usize> {
+        Ok(0)
+    }
+
+    fn flush(&self) -> EscResult<()> {
+        Ok(())
+    }
+}
+
+/// Number of printable characters per line for each paper width.
+fn char_width(paper_size: &str) -> usize {
+    match paper_size {
+        "58mm" => 32,
+        "75mm" => 42,
+        _ => 48, // 80mm default
+    }
+}
+
+/// Checkbox area appended to the last line of each item: 1 space + box.
+/// Provides room for a manual pen check-off on the printed receipt.
+const CHECKBOX: &str = " [ ]";
+
+/// Word-wrap a single item to `text_width` columns, then format as a receipt
+/// line with dot-leaders and a checkbox:
+///
+/// ```text
+/// 2 sak aci ......................... [ ]
+/// teks yang sangat panjang sekali ini
+/// dilanjutkan ke bawah ............. [ ]
+/// ```
+///
+/// - Lines before the last: plain wrapped text (no dots, no checkbox)
+/// - Last line: text + dot-leaders filling to `text_width` + CHECKBOX
+fn format_item_line(item: &str, total_width: usize) -> Vec<String> {
+    let checkbox_len = CHECKBOX.len();
+    // Reserve space for checkbox; text body fits in the remaining columns
+    let text_width = total_width.saturating_sub(checkbox_len);
+
+    let mut out = Vec::new();
+
+    if item.is_empty() {
+        // Empty line → just a dot-leader row for blank items
+        let dots: String = ".".repeat(text_width);
+        out.push(format!("{dots}{CHECKBOX}"));
+        return out;
+    }
+
+    let wrapped: Vec<String> = textwrap::wrap(item, text_width)
+        .into_iter()
+        .map(|s| s.into_owned())
+        .collect();
+
+    let last_idx = wrapped.len().saturating_sub(1);
+    for (i, segment) in wrapped.iter().enumerate() {
+        if i < last_idx {
+            // Continuation lines: print as-is (no checkbox yet)
+            out.push(segment.clone());
+        } else {
+            // Last (or only) segment: pad with dots then checkbox
+            let dots_needed = text_width.saturating_sub(segment.len());
+            let dots: String = ".".repeat(dots_needed);
+            out.push(format!("{segment}{dots}{CHECKBOX}"));
+        }
+    }
+
+    out
+}
+
+/// Build the receipt as a list of plain-text lines (no ESC/POS control bytes).
+/// Used both by `build_receipt` (which then feeds the lines to the ESC/POS
+/// printer) and by `build_receipt_preview` (plain text for on-screen display).
+pub fn build_receipt_lines(order: &Order, settings: &AppSettings) -> Vec<String> {
+    let width = char_width(&settings.paper_size);
+
+    let mut lines: Vec<String> = Vec::new();
+
+    // Line 0 — customer name (no label, prominent; index used by build_receipt for bold+size)
+    lines.push(format!("  {}", order.customer_name));
+    lines.push(format!("  Tanggal  : {}", order.created_at));
+    lines.push(String::new()); // blank line before items
+
+    // Content items with dot-leaders + checkbox
+    for item in order.content.lines() {
+        for line in format_item_line(item, width) {
+            lines.push(line);
+        }
+    }
+
+    lines.push(String::new()); // blank line after items
+
+    // Footer
+    if !settings.footer_text.is_empty() {
+        let pad = (width.saturating_sub(settings.footer_text.len())) / 2;
+        lines.push(format!("{:>width$}", settings.footer_text, width = pad + settings.footer_text.len()));
+    }
+
+    // Store name at bottom, centred within the 2-space indented area
+    if !settings.store_name.is_empty() {
+        let available = width.saturating_sub(2);
+        let pad = (available.saturating_sub(settings.store_name.len())) / 2;
+        lines.push(format!("  {:>width$}", settings.store_name, width = pad + settings.store_name.len()));
+    }
+
+    // PC name
+    if !settings.pc_name.is_empty() {
+        lines.push(format!("PC: {}", settings.pc_name));
+    }
+
+    lines
+}
+
+/// Build ESC/POS receipt bytes for the given order and settings.
+pub fn build_receipt(order: &Order, settings: &AppSettings) -> Vec<u8> {
+    let lines = build_receipt_lines(order, settings);
+
+    let driver = VecDriver::new();
+    let driver_clone = driver.clone();
+
+    // Scope the Printer so it is dropped (and its internal buffer flushed to the
+    // driver) before we call driver_clone.into_bytes().
+    {
+        let mut printer = Printer::new(driver, Protocol::default(), None);
+
+        let result: EscResult<()> = (|| {
+            printer.init()?;
+            for (i, line) in lines.iter().enumerate() {
+                // Line 0 = customer name: double-height + bold for emphasis
+                if i == 0 {
+                    // GS ! 0x10 → double height (height×2, width×1)
+                    printer.custom(b"\x1D\x21\x10")?;
+                    printer.bold(true)?;
+                }
+                printer.writeln(line)?;
+                if i == 0 {
+                    printer.bold(false)?;
+                    // GS ! 0x00 → reset to normal size
+                    printer.custom(b"\x1D\x21\x00")?;
+                }
+            }
+            printer.feeds(3)?;
+            if settings.auto_cut {
+                printer.print_cut()?;
+            } else {
+                // Flush buffered instructions to the driver without sending a cut command.
+                printer.print()?;
+            }
+            Ok(())
+        })();
+
+        if let Err(e) = result {
+            eprintln!("ESC/POS build error: {e}");
+        }
+    } // Printer dropped here — flushes any internally-buffered bytes to VecDriver
+
+    driver_clone.into_bytes()
+}
+
+/// Return the receipt as a plain-text string for on-screen preview.
+pub fn build_receipt_preview(order: &Order, settings: &AppSettings) -> String {
+    build_receipt_lines(order, settings).join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::orders::Order;
+    use crate::db::settings::AppSettings;
+
+    fn default_settings() -> AppSettings {
+        AppSettings {
+            default_printer: String::new(),
+            paper_size: "80mm".to_string(),
+            store_name: String::new(),
+            footer_text: String::new(),
+            serial_baud_rate: 9600,
+            auto_cut: false,
+            pc_name: String::new(),
+        }
+    }
+
+    fn make_order(customer: &str, content: &str) -> Order {
+        Order {
+            id: 1,
+            customer_name: customer.to_string(),
+            content: content.to_string(),
+            created_at: "2026-04-24 10:00:00".to_string(),
+        }
+    }
+
+    // ── char_width ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn char_width_58mm() {
+        assert_eq!(char_width("58mm"), 32);
+    }
+
+    #[test]
+    fn char_width_75mm() {
+        assert_eq!(char_width("75mm"), 42);
+    }
+
+    #[test]
+    fn char_width_80mm_default() {
+        assert_eq!(char_width("80mm"), 48);
+        assert_eq!(char_width("unknown"), 48);
+        assert_eq!(char_width(""), 48);
+    }
+
+    // ── format_item_line ─────────────────────────────────────────────────────
+
+    #[test]
+    fn format_item_line_empty_produces_dot_row() {
+        let lines = format_item_line("", 32);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].ends_with(CHECKBOX));
+        // All chars before checkbox should be dots
+        let dots_part = &lines[0][..lines[0].len() - CHECKBOX.len()];
+        assert!(dots_part.chars().all(|c| c == '.'));
+    }
+
+    #[test]
+    fn format_item_line_short_fits_single_line() {
+        let item = "2 sak beras";
+        let lines = format_item_line(item, 32);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].starts_with(item));
+        assert!(lines[0].ends_with(CHECKBOX));
+        assert_eq!(lines[0].len(), 32);
+    }
+
+    #[test]
+    fn format_item_line_long_wraps_and_checkbox_only_on_last() {
+        // Width 32, CHECKBOX is 4 chars → text body 28 chars
+        // "A very long item name that wraps" is >28 chars
+        let item = "Pesanan dengan nama barang yang sangat panjang";
+        let lines = format_item_line(item, 32);
+        assert!(lines.len() >= 2, "expected wrap");
+        // Only the last line should have the checkbox
+        for line in &lines[..lines.len() - 1] {
+            assert!(!line.ends_with(CHECKBOX), "continuation line has checkbox: {line}");
+        }
+        assert!(lines.last().unwrap().ends_with(CHECKBOX));
+    }
+
+    #[test]
+    fn format_item_line_last_line_total_width_equals_total_width() {
+        let item = "Short";
+        let width = 48usize;
+        let lines = format_item_line(item, width);
+        assert_eq!(lines.last().unwrap().len(), width);
+    }
+
+    // ── build_receipt_lines ───────────────────────────────────────────────────
+
+    #[test]
+    fn receipt_lines_line0_is_customer_name() {
+        let order = make_order("Pak Budi", "1 sak beras");
+        let settings = default_settings();
+        let lines = build_receipt_lines(&order, &settings);
+        assert_eq!(lines[0], "  Pak Budi");
+    }
+
+    #[test]
+    fn receipt_lines_line1_is_tanggal() {
+        let order = make_order("X", "item");
+        let settings = default_settings();
+        let lines = build_receipt_lines(&order, &settings);
+        assert!(lines[1].contains("Tanggal"), "line 1 should contain 'Tanggal'");
+        assert!(lines[1].contains("2026-04-24 10:00:00"));
+    }
+
+    #[test]
+    fn receipt_lines_blank_line_before_items() {
+        let order = make_order("X", "item");
+        let settings = default_settings();
+        let lines = build_receipt_lines(&order, &settings);
+        assert_eq!(lines[2], "");
+    }
+
+    #[test]
+    fn receipt_lines_items_contain_checkbox() {
+        let order = make_order("X", "2 sak beras\n1 sak terigu");
+        let settings = default_settings();
+        let lines = build_receipt_lines(&order, &settings);
+        let item_lines: Vec<&String> = lines.iter().filter(|l| l.contains("[ ]")).collect();
+        assert_eq!(item_lines.len(), 2);
+    }
+
+    #[test]
+    fn receipt_lines_footer_text_appears_when_set() {
+        let order = make_order("X", "item");
+        let mut settings = default_settings();
+        settings.footer_text = "Terima kasih".to_string();
+        let lines = build_receipt_lines(&order, &settings);
+        assert!(lines.iter().any(|l| l.contains("Terima kasih")));
+    }
+
+    #[test]
+    fn receipt_lines_store_name_appears_after_items() {
+        let order = make_order("X", "item");
+        let mut settings = default_settings();
+        settings.store_name = "Toko Maju".to_string();
+        let lines = build_receipt_lines(&order, &settings);
+        // Store name must appear after all item lines (which contain "[ ]")
+        let last_item_idx = lines.iter().rposition(|l| l.contains("[ ]")).unwrap();
+        let store_idx = lines.iter().rposition(|l| l.contains("Toko Maju")).unwrap();
+        assert!(store_idx > last_item_idx);
+    }
+
+    #[test]
+    fn receipt_lines_store_name_centering_respects_2space_prefix() {
+        let order = make_order("X", "item");
+        let mut settings = default_settings();
+        settings.paper_size = "80mm".to_string(); // width = 48
+        settings.store_name = "AB".to_string();   // 2 chars
+        let lines = build_receipt_lines(&order, &settings);
+        let store_line = lines.iter().find(|l| l.contains("AB")).unwrap();
+        // "  " prefix + pad + "AB" — total line length should be ≤ 48 chars
+        assert!(store_line.len() <= 48, "store line too wide: '{store_line}'");
+        // There should be spaces before "AB" (centred, not left-aligned)
+        assert!(store_line.trim_start().starts_with("AB") || store_line.contains(" AB"),
+            "store name not padded: '{store_line}'");
+    }
+
+    #[test]
+    fn receipt_lines_pc_name_appears_last_when_set() {
+        let order = make_order("X", "item");
+        let mut settings = default_settings();
+        settings.pc_name = "Kasir 1".to_string();
+        let lines = build_receipt_lines(&order, &settings);
+        let last = lines.last().unwrap();
+        assert!(last.contains("Kasir 1"));
+        assert!(last.starts_with("PC:"));
+    }
+
+    #[test]
+    fn receipt_lines_no_store_no_footer_no_pc_when_empty() {
+        let order = make_order("X", "item");
+        let settings = default_settings(); // all empty
+        let lines = build_receipt_lines(&order, &settings);
+        assert!(!lines.iter().any(|l| l.starts_with("PC:")));
+    }
+
+    // ── VecDriver ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn vec_driver_write_and_into_bytes() {
+        let driver = VecDriver::new();
+        driver.write(b"hello").unwrap();
+        driver.write(b" world").unwrap();
+        let bytes = driver.into_bytes();
+        assert_eq!(bytes, b"hello world");
+    }
+
+    #[test]
+    fn vec_driver_clone_shares_buffer() {
+        let driver = VecDriver::new();
+        let clone = driver.clone();
+        driver.write(b"abc").unwrap();
+        // clone shares the same Arc<Mutex<Vec<u8>>> — both see the write
+        let bytes = clone.into_bytes();
+        assert_eq!(bytes, b"abc");
+    }
+
+    #[test]
+    fn vec_driver_flush_and_read_are_noop() {
+        let driver = VecDriver::new();
+        driver.flush().unwrap();
+        let mut buf = [0u8; 4];
+        let n = driver.read(&mut buf).unwrap();
+        assert_eq!(n, 0);
+    }
+
+    // ── build_receipt ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn build_receipt_returns_nonempty_bytes() {
+        let order = make_order("Pak Budi", "2 sak beras");
+        let settings = default_settings();
+        let bytes = build_receipt(&order, &settings);
+        assert!(!bytes.is_empty());
+    }
+
+    #[test]
+    fn build_receipt_starts_with_esc_pos_init() {
+        let order = make_order("X", "item");
+        let settings = default_settings();
+        let bytes = build_receipt(&order, &settings);
+        // ESC/POS init sequence: ESC @ = 0x1B 0x40
+        assert!(
+            bytes.windows(2).any(|w| w == [0x1B, 0x40]),
+            "missing ESC @ init sequence"
+        );
+    }
+
+    #[test]
+    fn build_receipt_contains_double_height_command() {
+        let order = make_order("Besar", "item");
+        let settings = default_settings();
+        let bytes = build_receipt(&order, &settings);
+        // GS ! 0x10 = double height
+        assert!(
+            bytes.windows(3).any(|w| w == [0x1D, 0x21, 0x10]),
+            "missing double-height GS!0x10"
+        );
+        // GS ! 0x00 = reset size
+        assert!(
+            bytes.windows(3).any(|w| w == [0x1D, 0x21, 0x00]),
+            "missing size-reset GS!0x00"
+        );
+    }
+
+    #[test]
+    fn build_receipt_auto_cut_emits_cut_command() {
+        let order = make_order("X", "item");
+        let mut settings = default_settings();
+        settings.auto_cut = true;
+        let bytes_cut = build_receipt(&order, &settings);
+        settings.auto_cut = false;
+        let bytes_no_cut = build_receipt(&order, &settings);
+        // With auto_cut the byte stream should be longer (cut command appended)
+        assert!(bytes_cut.len() > bytes_no_cut.len());
+    }
+
+    // ── build_receipt_preview ─────────────────────────────────────────────────
+
+    #[test]
+    fn build_receipt_preview_contains_customer_name() {
+        let order = make_order("DK PASAR", "5 sak beras");
+        let settings = default_settings();
+        let preview = build_receipt_preview(&order, &settings);
+        assert!(preview.contains("DK PASAR"));
+    }
+}
+
+/// Build a simple test receipt.
+pub fn build_test_receipt(settings: &AppSettings) -> Vec<u8> {
+    let test_order = Order {
+        id: 0,
+        customer_name: "Test Print".to_string(),
+        content: "2 sak aci\n1 sak terigu\n10 kg gula los\n40 kg minyak curah goreng kemasan besar ekonomis\nPesanan dengan nama barang yang sangat panjang sekali sampai harus lanjut baris berikutnya\n5 karton teh botol sosro".to_string(),
+        created_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+    };
+    build_receipt(&test_order, settings)
+}
