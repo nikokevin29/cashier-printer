@@ -12,6 +12,7 @@
     serial_baud_rate: 9600,
     auto_cut: true,
     pc_name: '',
+    content_font_size: 'normal',
   });
 
   let printers: PrinterInfo[] = $state([]);
@@ -151,6 +152,27 @@
       <div class="section-header">
         <span class="material-symbols-outlined section-icon">receipt_long</span>
         <span class="section-title">Template Cetak</span>
+      </div>
+
+      <div class="field">
+        <span class="field-label">Ukuran Font Isi Pesanan</span>
+        <div class="chip-group">
+          {#each [
+            { value: 'normal', label: 'Normal',    desc: '1×' },
+            { value: 'tall',   label: 'Tinggi 2×', desc: 'tinggi' },
+            { value: 'wide',   label: 'Lebar 2×',  desc: 'lebar' },
+            { value: 'large',  label: 'Besar 2×2', desc: 'lebar+tinggi' },
+          ] as opt}
+            <label class="chip" class:chip-selected={settings.content_font_size === opt.value} title={opt.desc}>
+              <input type="radio" bind:group={settings.content_font_size} value={opt.value} />
+              {opt.label}
+            </label>
+          {/each}
+        </div>
+        <p class="field-support">
+          Mengatur ukuran font baris item pesanan. Garis putus-putus menyesuaikan otomatis.<br>
+          <strong>Lebar 2×</strong> / <strong>Besar 2×2</strong>: lebar karakter ganda — kolom teks berkurang separuh.
+        </p>
       </div>
 
       <div class="field">
