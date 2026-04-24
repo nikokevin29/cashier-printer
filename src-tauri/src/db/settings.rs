@@ -16,6 +16,9 @@ pub struct AppSettings {
     /// Display name of this workstation, printed at the bottom of each receipt
     /// and shown in the order history list. Auto-populated from system hostname.
     pub pc_name: String,
+    /// ESC/POS character size for the order content (item list) lines.
+    /// "normal" = 1×1 · "tall" = 1×2 (double-height) · "wide" = 2×1 (double-width) · "large" = 2×2
+    pub content_font_size: String,
 }
 
 pub fn get_setting(conn: &Connection, key: &str) -> Result<String> {
@@ -50,6 +53,8 @@ pub fn get_all_settings(conn: &Connection) -> Result<AppSettings> {
             .map(|v| v != "false")
             .unwrap_or(true),
         pc_name: get_setting(conn, "pc_name").unwrap_or_default(),
+        content_font_size: get_setting(conn, "content_font_size")
+            .unwrap_or_else(|_| "normal".to_string()),
     })
 }
 
@@ -61,6 +66,7 @@ pub fn save_all_settings(conn: &Connection, settings: &AppSettings) -> Result<()
     set_setting(conn, "serial_baud_rate", &settings.serial_baud_rate.to_string())?;
     set_setting(conn, "auto_cut", if settings.auto_cut { "true" } else { "false" })?;
     set_setting(conn, "pc_name", &settings.pc_name)?;
+    set_setting(conn, "content_font_size", &settings.content_font_size)?;
     Ok(())
 }
 
@@ -72,13 +78,14 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);
-             INSERT INTO settings VALUES ('paper_size',       '80mm');
-             INSERT INTO settings VALUES ('default_printer',  '');
-             INSERT INTO settings VALUES ('store_name',       '');
-             INSERT INTO settings VALUES ('footer_text',      '');
-             INSERT INTO settings VALUES ('serial_baud_rate', '9600');
-             INSERT INTO settings VALUES ('auto_cut',         'true');
-             INSERT INTO settings VALUES ('pc_name',          '');",
+             INSERT INTO settings VALUES ('paper_size',        '80mm');
+             INSERT INTO settings VALUES ('default_printer',   '');
+             INSERT INTO settings VALUES ('store_name',        '');
+             INSERT INTO settings VALUES ('footer_text',       '');
+             INSERT INTO settings VALUES ('serial_baud_rate',  '9600');
+             INSERT INTO settings VALUES ('auto_cut',          'true');
+             INSERT INTO settings VALUES ('pc_name',           '');
+             INSERT INTO settings VALUES ('content_font_size', 'normal');",
         )
         .unwrap();
         conn
@@ -126,6 +133,7 @@ mod tests {
         assert_eq!(s.store_name, "");
         assert_eq!(s.footer_text, "");
         assert_eq!(s.pc_name, "");
+        assert_eq!(s.content_font_size, "normal");
     }
 
     #[test]
@@ -139,6 +147,7 @@ mod tests {
             serial_baud_rate: 19200,
             auto_cut: false,
             pc_name: "Kasir 2".to_string(),
+            content_font_size: "large".to_string(),
         };
         save_all_settings(&conn, &original).unwrap();
         let loaded = get_all_settings(&conn).unwrap();
@@ -149,6 +158,7 @@ mod tests {
         assert_eq!(loaded.serial_baud_rate, 19200);
         assert!(!loaded.auto_cut);
         assert_eq!(loaded.pc_name, "Kasir 2");
+        assert_eq!(loaded.content_font_size, "large");
     }
 
     #[test]

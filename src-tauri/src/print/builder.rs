@@ -62,6 +62,30 @@ fn char_width(paper_size: &str) -> usize {
     }
 }
 
+/// Effective characters per line for item text, accounting for font width scaling.
+/// Double-width fonts ("wide", "large") take 2 hardware columns per character,
+/// so the wrap budget is halved.
+fn effective_width(paper_size: &str, font_size: &str) -> usize {
+    let base = char_width(paper_size);
+    match font_size {
+        "wide" | "large" => base / 2,
+        _ => base, // "normal", "tall", or any unknown value
+    }
+}
+
+/// ESC/POS GS ! byte that encodes the requested content font size.
+/// Bit layout: bits 2:0 = width multiplier−1, bits 6:4 = height multiplier−1.
+///   0x00 = normal (1×1)   0x10 = tall (1×2)
+///   0x01 = wide (2×1)     0x11 = large (2×2)
+fn content_font_byte(font_size: &str) -> u8 {
+    match font_size {
+        "tall"  => 0x10,
+        "wide"  => 0x01,
+        "large" => 0x11,
+        _       => 0x00, // "normal" or unknown
+    }
+}
+
 /// Checkbox area appended to the last line of each item: 1 space + box.
 /// Provides room for a manual pen check-off on the printed receipt.
 const CHECKBOX: &str = " [ ]";
@@ -117,17 +141,21 @@ fn format_item_line(item: &str, total_width: usize) -> Vec<String> {
 /// printer) and by `build_receipt_preview` (plain text for on-screen display).
 pub fn build_receipt_lines(order: &Order, settings: &AppSettings) -> Vec<String> {
     let width = char_width(&settings.paper_size);
+    let eff_width = effective_width(&settings.paper_size, &settings.content_font_size);
 
     let mut lines: Vec<String> = Vec::new();
 
-    // Line 0 — customer name (no label, prominent; index used by build_receipt for bold+size)
-    lines.push(format!("  {}", order.customer_name));
+    // Line 0 — customer name, centred horizontally (plain-text preview approximation)
+    let name = &order.customer_name;
+    let name_pad = (width.saturating_sub(name.len())) / 2;
+    lines.push(format!("{:>w$}", name, w = name_pad + name.len()));
+
     lines.push(format!("  Tanggal  : {}", order.created_at));
     lines.push(String::new()); // blank line before items
 
-    // Content items with dot-leaders + checkbox
+    // Content items with dot-leaders + checkbox, wrapped to effective column width
     for item in order.content.lines() {
-        for line in format_item_line(item, width) {
+        for line in format_item_line(item, eff_width) {
             lines.push(line);
         }
     }
@@ -157,7 +185,9 @@ pub fn build_receipt_lines(order: &Order, settings: &AppSettings) -> Vec<String>
 
 /// Build ESC/POS receipt bytes for the given order and settings.
 pub fn build_receipt(order: &Order, settings: &AppSettings) -> Vec<u8> {
-    let lines = build_receipt_lines(order, settings);
+    let width = char_width(&settings.paper_size);
+    let eff_width = effective_width(&settings.paper_size, &settings.content_font_size);
+    let font_byte = content_font_byte(&settings.content_font_size);
 
     let driver = VecDriver::new();
     let driver_clone = driver.clone();
@@ -169,20 +199,54 @@ pub fn build_receipt(order: &Order, settings: &AppSettings) -> Vec<u8> {
 
         let result: EscResult<()> = (|| {
             printer.init()?;
-            for (i, line) in lines.iter().enumerate() {
-                // Line 0 = customer name: double-height + bold for emphasis
-                if i == 0 {
-                    // GS ! 0x10 → double height (height×2, width×1)
-                    printer.custom(b"\x1D\x21\x10")?;
-                    printer.bold(true)?;
-                }
-                printer.writeln(line)?;
-                if i == 0 {
-                    printer.bold(false)?;
-                    // GS ! 0x00 → reset to normal size
-                    printer.custom(b"\x1D\x21\x00")?;
+
+            // ── Customer name: centred, double-height, bold ───────────────────
+            printer.justify(JustifyMode::CENTER)?;
+            // GS ! 0x10 → double height (height×2, width×1)
+            printer.custom(b"\x1D\x21\x10")?;
+            printer.bold(true)?;
+            printer.writeln(&order.customer_name)?;
+            printer.bold(false)?;
+            // GS ! 0x00 → reset to normal size
+            printer.custom(b"\x1D\x21\x00")?;
+            printer.justify(JustifyMode::LEFT)?;
+
+            // ── Date ──────────────────────────────────────────────────────────
+            printer.writeln(&format!("  Tanggal  : {}", order.created_at))?;
+            printer.writeln("")?; // blank line before items
+
+            // ── Content items with configured font size ───────────────────────
+            printer.custom(&[0x1D, 0x21, font_byte])?;
+            for item in order.content.lines() {
+                for line in format_item_line(item, eff_width) {
+                    printer.writeln(&line)?;
                 }
             }
+            printer.custom(b"\x1D\x21\x00")?; // reset font to normal
+            printer.writeln("")?; // blank line after items
+
+            // ── Footer ────────────────────────────────────────────────────────
+            if !settings.footer_text.is_empty() {
+                let pad = (width.saturating_sub(settings.footer_text.len())) / 2;
+                printer.writeln(&format!(
+                    "{:>w$}",
+                    settings.footer_text,
+                    w = pad + settings.footer_text.len()
+                ))?;
+            }
+
+            // ── Store name: centred via ESC/POS alignment ─────────────────────
+            if !settings.store_name.is_empty() {
+                printer.justify(JustifyMode::CENTER)?;
+                printer.writeln(&settings.store_name)?;
+                printer.justify(JustifyMode::LEFT)?;
+            }
+
+            // ── PC / kasir name ───────────────────────────────────────────────
+            if !settings.pc_name.is_empty() {
+                printer.writeln(&format!("PC: {}", settings.pc_name))?;
+            }
+
             printer.feeds(3)?;
             if settings.auto_cut {
                 printer.print_cut()?;
@@ -221,6 +285,7 @@ mod tests {
             serial_baud_rate: 9600,
             auto_cut: false,
             pc_name: String::new(),
+            content_font_size: "normal".to_string(),
         }
     }
 
@@ -231,6 +296,34 @@ mod tests {
             content: content.to_string(),
             created_at: "2026-04-24 10:00:00".to_string(),
         }
+    }
+
+    // ── effective_width ───────────────────────────────────────────────────────
+
+    #[test]
+    fn effective_width_normal_and_tall_unchanged() {
+        assert_eq!(effective_width("80mm", "normal"), 48);
+        assert_eq!(effective_width("80mm", "tall"), 48);
+        assert_eq!(effective_width("58mm", "normal"), 32);
+        assert_eq!(effective_width("58mm", "tall"), 32);
+    }
+
+    #[test]
+    fn effective_width_wide_and_large_halved() {
+        assert_eq!(effective_width("80mm", "wide"), 24);
+        assert_eq!(effective_width("80mm", "large"), 24);
+        assert_eq!(effective_width("58mm", "wide"), 16);
+    }
+
+    // ── content_font_byte ─────────────────────────────────────────────────────
+
+    #[test]
+    fn content_font_byte_values() {
+        assert_eq!(content_font_byte("normal"), 0x00);
+        assert_eq!(content_font_byte("tall"),   0x10);
+        assert_eq!(content_font_byte("wide"),   0x01);
+        assert_eq!(content_font_byte("large"),  0x11);
+        assert_eq!(content_font_byte(""),       0x00); // unknown → normal
     }
 
     // ── char_width ────────────────────────────────────────────────────────────
@@ -299,11 +392,16 @@ mod tests {
     // ── build_receipt_lines ───────────────────────────────────────────────────
 
     #[test]
-    fn receipt_lines_line0_is_customer_name() {
+    fn receipt_lines_line0_is_customer_name_centred() {
         let order = make_order("Pak Budi", "1 sak beras");
-        let settings = default_settings();
+        let settings = default_settings(); // 80mm = 48 cols
         let lines = build_receipt_lines(&order, &settings);
-        assert_eq!(lines[0], "  Pak Budi");
+        // Name must appear and be padded (centred, not left-aligned with 2-space prefix)
+        assert!(lines[0].contains("Pak Budi"));
+        // "  Pak Budi" would be left-aligned; centred version has more leading space
+        // 48 - 8 = 40, pad = 20 → "                    Pak Budi"
+        assert!(lines[0].starts_with("                    Pak Budi"),
+            "name not centred: '{}'", lines[0]);
     }
 
     #[test]
@@ -380,6 +478,19 @@ mod tests {
     }
 
     #[test]
+    fn receipt_lines_wide_font_wraps_at_half_columns() {
+        // 80mm = 48 cols, wide font → eff_width = 24; CHECKBOX = 4 → text body = 20
+        let item = "A".repeat(25); // 25 chars — would fit in 48 but not in 24
+        let order = make_order("X", &item);
+        let mut settings = default_settings();
+        settings.content_font_size = "wide".to_string();
+        let lines = build_receipt_lines(&order, &settings);
+        // At least one continuation line must exist (item wraps at 20 chars)
+        let has_wrap = lines.iter().any(|l| l.contains("[ ]") && l.len() <= 24);
+        assert!(has_wrap, "wide font item line should be ≤24 chars with checkbox");
+    }
+
+    #[test]
     fn receipt_lines_no_store_no_footer_no_pc_when_empty() {
         let order = make_order("X", "item");
         let settings = default_settings(); // all empty
@@ -440,6 +551,23 @@ mod tests {
     }
 
     #[test]
+    fn build_receipt_contains_center_alignment_for_name() {
+        let order = make_order("Budi", "item");
+        let settings = default_settings();
+        let bytes = build_receipt(&order, &settings);
+        // ESC a 1 = centre alignment: 0x1B 0x61 0x01
+        assert!(
+            bytes.windows(3).any(|w| w == [0x1B, 0x61, 0x01]),
+            "missing ESC a 1 (centre alignment)"
+        );
+        // ESC a 0 = left alignment restored: 0x1B 0x61 0x00
+        assert!(
+            bytes.windows(3).any(|w| w == [0x1B, 0x61, 0x00]),
+            "missing ESC a 0 (left alignment restore)"
+        );
+    }
+
+    #[test]
     fn build_receipt_contains_double_height_command() {
         let order = make_order("Besar", "item");
         let settings = default_settings();
@@ -453,6 +581,19 @@ mod tests {
         assert!(
             bytes.windows(3).any(|w| w == [0x1D, 0x21, 0x00]),
             "missing size-reset GS!0x00"
+        );
+    }
+
+    #[test]
+    fn build_receipt_content_font_byte_emitted() {
+        let order = make_order("X", "item");
+        let mut settings = default_settings();
+        settings.content_font_size = "large".to_string(); // GS ! 0x11
+        let bytes = build_receipt(&order, &settings);
+        // GS ! 0x11 = double width + double height for content
+        assert!(
+            bytes.windows(3).any(|w| w == [0x1D, 0x21, 0x11]),
+            "missing GS!0x11 (large font)"
         );
     }
 

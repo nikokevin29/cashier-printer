@@ -26,8 +26,9 @@ const SCHEMA_SQL: &str = "
     INSERT OR IGNORE INTO settings (key, value) VALUES ('store_name',        'CV REJEKI AMERTA JAYA');
     INSERT OR IGNORE INTO settings (key, value) VALUES ('footer_text',       '');
     INSERT OR IGNORE INTO settings (key, value) VALUES ('serial_baud_rate',  '9600');
-    INSERT OR IGNORE INTO settings (key, value) VALUES ('auto_cut',          'true');
-    INSERT OR IGNORE INTO settings (key, value) VALUES ('pc_name',           '');
+    INSERT OR IGNORE INTO settings (key, value) VALUES ('auto_cut',           'true');
+    INSERT OR IGNORE INTO settings (key, value) VALUES ('pc_name',            '');
+    INSERT OR IGNORE INTO settings (key, value) VALUES ('content_font_size',  'normal');
 ";
 
 pub fn init(app_data_dir: &std::path::Path) -> Result<DbConn> {
