@@ -31,20 +31,28 @@
   // Convert plain-text preview lines into HTML divs so CSS can accurately
   // mirror what the ESC/POS printer produces:
   //   - line 0 (customer name)  → .preview-cname  (2× height, bold, centred)
-  //   - lines with [ ] (items)  → .preview-item    (font from content_font_size)
+  //   - lines with [ ] (items)  → .preview-item    (font-size + line-height inlined)
   //   - all other lines         → .line            (normal)
-  const previewHtml = $derived(
-    previewText.split('\n').map((line, i) => {
+  //
+  // IMPORTANT: contentFontSize is accessed here so this derived recomputes
+  // whenever the font setting changes — inline styles are used instead of
+  // CSS variables to guarantee the correct size is applied to {@html} content.
+  const previewHtml = $derived.by(() => {
+    const fs = (contentFontSize === 'wide' || contentFontSize === 'large') ? '1.56rem' : '0.78rem';
+    const lh = (contentFontSize === 'tall' || contentFontSize === 'large') ? '3.1' : '1.55';
+
+    return previewText.split('\n').map((line, i) => {
       const esc = line
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;');
       const safe = esc || '&nbsp;';
       if (i === 0) return `<div class="line preview-cname">${safe}</div>`;
-      if (esc.includes('[ ]')) return `<div class="line preview-item">${esc}</div>`;
+      if (esc.includes('[ ]'))
+        return `<div class="line preview-item" style="font-size:${fs};line-height:${lh}">${esc}</div>`;
       return `<div class="line">${safe}</div>`;
-    }).join('')
-  );
+    }).join('');
+  });
 
   onMount(async () => {
     await loadOrders();
@@ -129,14 +137,6 @@
   let pcName = $state('');
   let contentFontSize = $state('normal');
 
-  // CSS font-size for item lines — wide/large are 2× width, so double the visual size.
-  const itemFontSize = $derived(
-    (contentFontSize === 'wide' || contentFontSize === 'large') ? '1.56rem' : '0.78rem'
-  );
-  // CSS line-height for item lines — tall/large are 2× height.
-  const itemLineHeight = $derived(
-    (contentFontSize === 'tall' || contentFontSize === 'large') ? '3.1' : '1.55'
-  );
 
 </script>
 
@@ -275,7 +275,7 @@
         {#if previewLoading}
           <p class="receipt-loading">Memuat preview...</p>
         {:else}
-          <div class="paper" style="--cols: {paperWidth}; --item-fs: {itemFontSize}; --item-lh: {itemLineHeight}">
+          <div class="paper" style="--cols: {paperWidth}">
             <!-- {@html} is safe here: content is escaped above -->
             <div class="receipt-text">{@html previewHtml}</div>
           </div>
@@ -575,9 +575,5 @@
     text-align: center;
   }
 
-  /* Content items: font-size and line-height driven by CSS vars set from content_font_size */
-  .receipt-text :global(.preview-item) {
-    font-size: var(--item-fs, .78rem);
-    line-height: var(--item-lh, 1.55);
-  }
+  /* Content items: font-size and line-height are inlined directly from previewHtml derived */
 </style>
