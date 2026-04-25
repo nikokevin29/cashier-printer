@@ -54,11 +54,14 @@ impl Driver for VecDriver {
 }
 
 /// Number of printable characters per line for each paper width.
+///
+/// TM-U220 (9-pin, 76mm): Font A = 40 cols. Using 42 causes the last 2 chars of
+/// a 42-char line to overflow, splitting " [ ]" as "[" on line N, "]" on line N+1.
 fn char_width(paper_size: &str) -> usize {
     match paper_size {
         "58mm" => 32,
-        "75mm" => 42,
-        _ => 48, // 80mm default
+        "75mm" => 40, // TM-U220 / 76mm dot-matrix: 40 cols (Font A)
+        _ => 48,       // 80mm default
     }
 }
 
@@ -307,6 +310,8 @@ mod tests {
         assert_eq!(effective_width("80mm", "tall"), 48);
         assert_eq!(effective_width("58mm", "normal"), 32);
         assert_eq!(effective_width("58mm", "tall"), 32);
+        assert_eq!(effective_width("75mm", "normal"), 40);
+        assert_eq!(effective_width("75mm", "tall"), 40);
     }
 
     #[test]
@@ -314,6 +319,37 @@ mod tests {
         assert_eq!(effective_width("80mm", "wide"), 24);
         assert_eq!(effective_width("80mm", "large"), 24);
         assert_eq!(effective_width("58mm", "wide"), 16);
+        assert_eq!(effective_width("75mm", "wide"), 20);
+        assert_eq!(effective_width("75mm", "large"), 20);
+    }
+
+    #[test]
+    fn item_line_75mm_never_exceeds_40_chars() {
+        // Regression guard: 75mm=42 caused " [ ]" to split across lines on TM-U220.
+        // Every formatted line must be ≤ 40 chars so nothing overflows the printer margin.
+        let total_width = char_width("75mm"); // must be 40
+        let items = [
+            "2slop signatur",
+            "1slop prima kertas",
+            "3slop prima biasa",
+            "2slop aroma bold 16",
+            "3slopmoza",
+            "3slop ggf",
+            "3slop ggm 12",
+            "2slop aroma bold 12",
+            "2slop surya 12 coklat",
+            // Long item that wraps
+            "Pesanan dengan nama barang yang sangat panjang sekali sampai harus ke baris berikutnya",
+        ];
+        for item in &items {
+            for line in format_item_line(item, total_width) {
+                assert!(
+                    line.len() <= total_width,
+                    "item '{item}' produced line len {} > {total_width}: '{line}'",
+                    line.len()
+                );
+            }
+        }
     }
 
     // ── content_font_byte ─────────────────────────────────────────────────────
@@ -336,7 +372,9 @@ mod tests {
 
     #[test]
     fn char_width_75mm() {
-        assert_eq!(char_width("75mm"), 42);
+        // TM-U220 (9-pin dot-matrix, 76mm paper) prints 40 columns per line in Font A.
+        // 42 caused " [ ]" to overflow: "[" at end of line, "]" on next line.
+        assert_eq!(char_width("75mm"), 40);
     }
 
     #[test]
