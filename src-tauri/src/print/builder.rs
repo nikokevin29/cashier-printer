@@ -65,59 +65,6 @@ fn char_width(paper_size: &str) -> usize {
     }
 }
 
-/// Effective characters per line for item text, accounting for font width scaling.
-/// Double-width fonts take 2 hardware columns per character, so the wrap budget is halved.
-fn effective_width(paper_size: &str, font_size: &str) -> usize {
-    let base = char_width(paper_size);
-    if is_double_wide(font_size) { base / 2 } else { base }
-}
-
-/// Returns true when the font size maps to a double-width ESC/POS mode.
-fn is_double_wide(font_size: &str) -> bool {
-    match font_size {
-        "wide" | "large" => true,
-        _ => font_size.parse::<u32>().unwrap_or(11) >= 18,
-    }
-}
-
-#[allow(dead_code)]
-/// Returns true when the font size maps to a double-height ESC/POS mode (tall or large).
-fn is_double_tall(font_size: &str) -> bool {
-    match font_size {
-        "tall" | "large" => true,
-        _ => matches!(font_size.parse::<u32>().unwrap_or(11), 14..=17 | 22..),
-    }
-}
-
-/// ESC/POS `GS !` byte (0x1D 0x21 n) for thermal printers.
-/// Bits 0-2 = width multiplier-1, bits 4-6 = height multiplier-1.
-fn content_font_byte(font_size: &str) -> u8 {
-    match font_size {
-        "normal" => return 0x00,
-        "tall"   => return 0x10,
-        "wide"   => return 0x01,
-        "large"  => return 0x11,
-        _ => {}
-    }
-    match font_size.parse::<u32>().unwrap_or(11) {
-        0..=13  => 0x00,
-        14..=17 => 0x10,
-        18..=21 => 0x01,
-        _       => 0x11,
-    }
-}
-
-/// ESC/P `ESC !` byte (0x1B 0x21 n) for dot-matrix printers (e.g. EPSON TM-U220).
-/// Bit 4 (0x10) = double height, bit 5 (0x20) = double width.
-/// Sent alongside GS ! so both thermal and dot-matrix printers respond.
-fn content_escbang_byte(font_size: &str) -> u8 {
-    match font_size {
-        "tall"  => 0x10,
-        "wide"  => 0x20,
-        "large" => 0x30,
-        _ => 0x00,
-    }
-}
 
 /// Checkbox area appended to the last line of each item: 1 space + box.
 /// Provides room for a manual pen check-off on the printed receipt.
@@ -182,11 +129,9 @@ fn format_plain_line(item: &str, width: usize) -> Vec<String> {
 }
 
 /// Build the receipt as a list of plain-text lines (no ESC/POS control bytes).
-/// Used both by `build_receipt` (which then feeds the lines to the ESC/POS
-/// printer) and by `build_receipt_preview` (plain text for on-screen display).
 pub fn build_receipt_lines(order: &Order, settings: &AppSettings) -> Vec<String> {
     let width = char_width(&settings.paper_size);
-    let eff_width = effective_width(&settings.paper_size, &settings.content_font_size);
+    let eff_width = width;
 
     let mut lines: Vec<String> = Vec::new();
 
@@ -200,7 +145,7 @@ pub fn build_receipt_lines(order: &Order, settings: &AppSettings) -> Vec<String>
 
         for item in order.content.lines() {
             for line in format_plain_line(item, eff_width) {
-                lines.push(format!("\x01{}", line));
+                lines.push(line);
             }
         }
 
@@ -229,7 +174,7 @@ pub fn build_receipt_lines(order: &Order, settings: &AppSettings) -> Vec<String>
 
         for item in order.content.lines() {
             for line in format_item_line(item, eff_width) {
-                lines.push(format!("\x01{}", line));
+                lines.push(line);
             }
         }
 
@@ -268,10 +213,7 @@ pub fn build_receipt_lines(order: &Order, settings: &AppSettings) -> Vec<String>
 /// Build ESC/POS receipt bytes for the given order and settings.
 pub fn build_receipt(order: &Order, settings: &AppSettings) -> Vec<u8> {
     let width = char_width(&settings.paper_size);
-    let eff_width = effective_width(&settings.paper_size, &settings.content_font_size);
-    let font_byte = content_font_byte(&settings.content_font_size);
-
-    let escbang_byte = content_escbang_byte(&settings.content_font_size);
+    let eff_width = width;
 
     let driver = VecDriver::new();
     let driver_clone = driver.clone();
@@ -299,15 +241,11 @@ pub fn build_receipt(order: &Order, settings: &AppSettings) -> Vec<u8> {
                 printer.writeln("")?;
 
                 // ── Content items ─────────────────────────────────────────────
-                printer.custom(&[0x1D, 0x21, font_byte])?;    // thermal
-                printer.custom(&[0x1B, 0x21, escbang_byte])?; // dot-matrix
                 for item in order.content.lines() {
                     for line in format_plain_line(item, eff_width) {
                         printer.writeln(&line)?;
                     }
                 }
-                printer.custom(b"\x1D\x21\x00")?;
-                printer.custom(b"\x1B\x21\x00")?;
                 printer.writeln("")?;
 
                 // ── Signature area ────────────────────────────────────────────
@@ -335,16 +273,12 @@ pub fn build_receipt(order: &Order, settings: &AppSettings) -> Vec<u8> {
                 printer.writeln(&format!("  Tanggal  : {}", order.created_at))?;
                 printer.writeln("")?;
 
-                // ── Content items with configured font size ───────────────────
-                printer.custom(&[0x1D, 0x21, font_byte])?;    // thermal
-                printer.custom(&[0x1B, 0x21, escbang_byte])?; // dot-matrix
+                // ── Content items ─────────────────────────────────────────────
                 for item in order.content.lines() {
                     for line in format_item_line(item, eff_width) {
                         printer.writeln(&line)?;
                     }
                 }
-                printer.custom(b"\x1D\x21\x00")?;
-                printer.custom(b"\x1B\x21\x00")?;
                 printer.writeln("")?;
 
                 // ── Footer ────────────────────────────────────────────────────
@@ -407,7 +341,6 @@ mod tests {
             serial_baud_rate: 9600,
             auto_cut: false,
             pc_name: String::new(),
-            content_font_size: "normal".to_string(),
             extra_feeds: 0,
         }
     }
@@ -432,27 +365,6 @@ mod tests {
             created_at: "2026-04-24 10:00:00".to_string(),
             pc_name: String::new(),
         }
-    }
-
-    // ── effective_width ───────────────────────────────────────────────────────
-
-    #[test]
-    fn effective_width_normal_and_tall_unchanged() {
-        assert_eq!(effective_width("80mm", "normal"), 48);
-        assert_eq!(effective_width("80mm", "tall"), 48);
-        assert_eq!(effective_width("58mm", "normal"), 32);
-        assert_eq!(effective_width("58mm", "tall"), 32);
-        assert_eq!(effective_width("75mm", "normal"), 40);
-        assert_eq!(effective_width("75mm", "tall"), 40);
-    }
-
-    #[test]
-    fn effective_width_wide_and_large_halved() {
-        assert_eq!(effective_width("80mm", "wide"), 24);
-        assert_eq!(effective_width("80mm", "large"), 24);
-        assert_eq!(effective_width("58mm", "wide"), 16);
-        assert_eq!(effective_width("75mm", "wide"), 20);
-        assert_eq!(effective_width("75mm", "large"), 20);
     }
 
     #[test]
@@ -482,28 +394,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    // ── content_font_byte ─────────────────────────────────────────────────────
-
-    #[test]
-    fn content_font_byte_values() {
-        // Legacy keywords
-        assert_eq!(content_font_byte("normal"), 0x00);
-        assert_eq!(content_font_byte("tall"),   0x10);
-        assert_eq!(content_font_byte("wide"),   0x01);
-        assert_eq!(content_font_byte("large"),  0x11);
-        assert_eq!(content_font_byte(""),       0x00); // unknown → normal
-        // Numeric pt values
-        assert_eq!(content_font_byte("8"),  0x00); // normal
-        assert_eq!(content_font_byte("11"), 0x00); // normal
-        assert_eq!(content_font_byte("13"), 0x00); // normal (< 14)
-        assert_eq!(content_font_byte("14"), 0x10); // tall
-        assert_eq!(content_font_byte("17"), 0x10); // tall (< 18)
-        assert_eq!(content_font_byte("18"), 0x01); // wide
-        assert_eq!(content_font_byte("21"), 0x01); // wide (< 22)
-        assert_eq!(content_font_byte("22"), 0x11); // large
-        assert_eq!(content_font_byte("24"), 0x11); // large
     }
 
     // ── char_width ────────────────────────────────────────────────────────────
@@ -658,22 +548,6 @@ mod tests {
     }
 
     #[test]
-    fn receipt_lines_wide_font_wraps_at_half_columns() {
-        // 80mm = 48 cols, wide font → eff_width = 24; CHECKBOX = 4 → text body = 20
-        let item = "A".repeat(25); // 25 chars — would fit in 48 but not in 24
-        let order = make_order("X", &item);
-        let mut settings = default_settings();
-        settings.content_font_size = "wide".to_string();
-        let lines = build_receipt_lines(&order, &settings);
-        // At least one continuation line must exist (item wraps at 20 chars)
-        let has_wrap = lines.iter().any(|l| {
-            let content = l.strip_prefix('\x01').unwrap_or(l.as_str());
-            content.contains("[ ]") && content.len() <= 24
-        });
-        assert!(has_wrap, "wide font item line should be ≤24 chars with checkbox");
-    }
-
-    #[test]
     fn receipt_lines_no_store_no_footer_no_pc_when_empty() {
         let order = make_order("X", "item");
         let settings = default_settings(); // all empty
@@ -764,19 +638,6 @@ mod tests {
         assert!(
             bytes.windows(3).any(|w| w == [0x1D, 0x21, 0x00]),
             "missing size-reset GS!0x00"
-        );
-    }
-
-    #[test]
-    fn build_receipt_content_font_byte_emitted() {
-        let order = make_order("X", "item");
-        let mut settings = default_settings();
-        settings.content_font_size = "large".to_string(); // GS ! 0x11
-        let bytes = build_receipt(&order, &settings);
-        // GS ! 0x11 = double width + double height for content
-        assert!(
-            bytes.windows(3).any(|w| w == [0x1D, 0x21, 0x11]),
-            "missing GS!0x11 (large font)"
         );
     }
 

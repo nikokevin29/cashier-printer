@@ -34,22 +34,13 @@
   let previewLoading = $state(false);
 
   const previewHtml = $derived.by(() => {
-    const wide = contentFontSize === 'wide' || contentFontSize === 'large';
-    const tall = contentFontSize === 'tall' || contentFontSize === 'large';
-    const fs   = wide ? '1.56rem' : '0.78rem';
-    const lh   = tall ? '3.1' : '1.55';
-
     return previewText.split('\n').map((line, i) => {
-      const isItem = line.startsWith('\x01');
-      const raw = isItem ? line.slice(1) : line;
-      const esc = raw
+      const esc = line
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;');
       const safe = esc || '&nbsp;';
       if (i === 0) return `<div class="line preview-cname">${safe}</div>`;
-      if (isItem)
-        return `<div class="line preview-item" style="font-size:${fs};line-height:${lh}">${esc}</div>`;
       return `<div class="line">${safe}</div>`;
     }).join('');
   });
@@ -60,7 +51,6 @@
       const s = await api.getSettings();
       paperWidth = CHAR_WIDTH[s.paper_size] ?? 48;
       pcName = s.pc_name;
-      contentFontSize = s.content_font_size ?? 'normal';
     } catch { /* ignore */ }
   });
 
@@ -133,7 +123,6 @@
   const CHAR_WIDTH: Record<string, number> = { '58mm': 32, '75mm': 42, '80mm': 48 };
   let paperWidth = $state(48);
   let pcName = $state('');
-  let contentFontSize = $state('normal');
 </script>
 
 <div class="page">
