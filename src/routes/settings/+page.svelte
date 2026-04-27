@@ -25,7 +25,6 @@
     serial_baud_rate: 9600,
     auto_cut: true,
     pc_name: '',
-    content_font_size: 'normal',
     extra_feeds: 0,
   });
 
@@ -344,28 +343,6 @@
       <div class="section-header">
         <span class="material-symbols-outlined section-icon">receipt_long</span>
         <span class="section-title">Template Cetak</span>
-      </div>
-
-      <div class="field">
-        <span class="field-label">Ukuran Font Isi Pesanan</span>
-        <div class="chip-group">
-          {#each [
-            { value: 'normal', label: 'Normal',      sub: '1× — standar' },
-            { value: 'tall',   label: 'Tinggi',      sub: '2× tinggi' },
-            { value: 'wide',   label: 'Lebar',       sub: '2× lebar, ½ kolom' },
-            { value: 'large',  label: 'Besar',       sub: '2× tinggi + lebar' },
-          ] as opt}
-            <label class="chip font-chip" class:chip-selected={settings.content_font_size === opt.value}>
-              <input type="radio" bind:group={settings.content_font_size} value={opt.value} />
-              <span class="chip-label">{opt.label}</span>
-              <span class="chip-sub">{opt.sub}</span>
-            </label>
-          {/each}
-        </div>
-        <p class="field-support">
-          Printer ESC/POS raw hanya mendukung 4 ukuran fisik ini.
-          <strong>Lebar</strong> dan <strong>Besar</strong> mengurangi kolom teks separuh — baris item lebih sedikit per baris.
-        </p>
       </div>
 
       <div class="field">
@@ -714,12 +691,6 @@
   .progress-bar { flex: 1; height: 6px; border-radius: 3px; background: var(--md-outline-variant); overflow: hidden; }
   .progress-fill { height: 100%; background: var(--md-primary); border-radius: 3px; transition: width .2s; }
   .progress-label { font-size: .75rem; color: var(--md-on-surface-variant); width: 32px; text-align: right; }
-
-  /* ── Font chip sub-label ── */
-  .font-chip { flex-direction: column; height: auto; padding: 6px 14px; gap: 2px; align-items: center; }
-  .chip-label { font-size: .875rem; font-weight: 500; }
-  .chip-sub   { font-size: .65rem; color: var(--md-on-surface-variant); font-weight: 400; }
-  .font-chip.chip-selected .chip-sub { color: var(--md-primary); opacity: .85; }
 
   /* ── LAN Sync peers ── */
   .peer-empty {

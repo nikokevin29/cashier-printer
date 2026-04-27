@@ -19,8 +19,6 @@ export interface AppSettings {
   auto_cut: boolean;
   /** Workstation display name shown in history and at the bottom of receipts. */
   pc_name: string;
-  /** ESC/POS character size for order content lines: "normal" | "tall" | "wide" | "large" */
-  content_font_size: string;
   /** Extra blank lines fed after the receipt (0–5) to push paper past the print head. */
   extra_feeds: number;
 }
