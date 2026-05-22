@@ -21,6 +21,10 @@ export interface AppSettings {
   pc_name: string;
   /** Extra blank lines fed after the receipt (0–5) to push paper past the print head. */
   extra_feeds: number;
+  /** Print item lines in bold/emphasized mode for larger appearance. */
+  bold_items: boolean;
+  /** Print item lines at double-width + double-height (one size level up). */
+  large_font: boolean;
 }
 
 export interface PrinterInfo {

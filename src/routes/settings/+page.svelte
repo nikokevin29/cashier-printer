@@ -26,6 +26,8 @@
     auto_cut: true,
     pc_name: '',
     extra_feeds: 0,
+    bold_items: false,
+    large_font: false,
   });
 
   let printers: PrinterInfo[] = $state([]);
@@ -319,6 +321,34 @@
           <div class="switch-text">
             <span class="switch-name">Potong kertas otomatis</span>
             <span class="switch-desc">Matikan untuk TM-U220 tanpa cutter.</span>
+          </div>
+        </label>
+      </div>
+
+      <!-- Bold items -->
+      <div class="field">
+        <label class="switch-label">
+          <div class="switch" class:switch-on={settings.bold_items}>
+            <input type="checkbox" bind:checked={settings.bold_items} />
+            <span class="switch-thumb"></span>
+          </div>
+          <div class="switch-text">
+            <span class="switch-name">Tebalkan tulisan item</span>
+            <span class="switch-desc">Cetak item pesanan dengan huruf tebal (bold).</span>
+          </div>
+        </label>
+      </div>
+
+      <!-- Large font -->
+      <div class="field">
+        <label class="switch-label">
+          <div class="switch" class:switch-on={settings.large_font}>
+            <input type="checkbox" bind:checked={settings.large_font} />
+            <span class="switch-thumb"></span>
+          </div>
+          <div class="switch-text">
+            <span class="switch-name">Perbesar ukuran font item</span>
+            <span class="switch-desc">Cetak item 2× lebih besar. Kolom per baris jadi setengahnya.</span>
           </div>
         </label>
       </div>

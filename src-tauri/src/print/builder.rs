@@ -60,9 +60,16 @@ impl Driver for VecDriver {
 fn char_width(paper_size: &str) -> usize {
     match paper_size {
         "58mm" => 32,
-        "75mm" => 38, // TM-U220 / 76mm dot-matrix: 38 cols (safe usable width)
+        "75mm" => 33, // TM-U220 / 76mm dot-matrix: 33 cols at 10 cpi normal mode
         _ => 48,       // 80mm default
     }
+}
+
+/// Effective column width for item text, halved when large_font is active
+/// (double-width mode prints each character twice as wide).
+fn eff_char_width(paper_size: &str, large_font: bool) -> usize {
+    let w = char_width(paper_size);
+    if large_font { w / 2 } else { w }
 }
 
 
@@ -131,7 +138,7 @@ fn format_plain_line(item: &str, width: usize) -> Vec<String> {
 /// Build the receipt as a list of plain-text lines (no ESC/POS control bytes).
 pub fn build_receipt_lines(order: &Order, settings: &AppSettings) -> Vec<String> {
     let width = char_width(&settings.paper_size);
-    let eff_width = width;
+    let eff_width = eff_char_width(&settings.paper_size, settings.large_font);
 
     let mut lines: Vec<String> = Vec::new();
 
@@ -213,7 +220,7 @@ pub fn build_receipt_lines(order: &Order, settings: &AppSettings) -> Vec<String>
 /// Build ESC/POS receipt bytes for the given order and settings.
 pub fn build_receipt(order: &Order, settings: &AppSettings) -> Vec<u8> {
     let width = char_width(&settings.paper_size);
-    let eff_width = width;
+    let eff_width = eff_char_width(&settings.paper_size, settings.large_font);
 
     let driver = VecDriver::new();
     let driver_clone = driver.clone();
@@ -274,10 +281,25 @@ pub fn build_receipt(order: &Order, settings: &AppSettings) -> Vec<u8> {
                 printer.writeln("")?;
 
                 // ── Content items ─────────────────────────────────────────────
+                if settings.large_font {
+                    // Double-width + double-height: thermal (GS !) and dot-matrix (ESC !)
+                    printer.custom(b"\x1D\x21\x11")?; // GS ! 0x11 = 2x width, 2x height (thermal)
+                    printer.custom(b"\x1B\x21\x30")?; // ESC ! 0x30 = double-width + double-height (dot-matrix)
+                }
+                if settings.bold_items {
+                    printer.bold(true)?;
+                }
                 for item in order.content.lines() {
                     for line in format_item_line(item, eff_width) {
                         printer.writeln(&line)?;
                     }
+                }
+                if settings.bold_items {
+                    printer.bold(false)?;
+                }
+                if settings.large_font {
+                    printer.custom(b"\x1D\x21\x00")?; // reset thermal
+                    printer.custom(b"\x1B\x21\x00")?; // reset dot-matrix
                 }
                 printer.writeln("")?;
 
@@ -342,6 +364,8 @@ mod tests {
             auto_cut: false,
             pc_name: String::new(),
             extra_feeds: 0,
+            bold_items: false,
+            large_font: false,
         }
     }
 
@@ -368,10 +392,10 @@ mod tests {
     }
 
     #[test]
-    fn item_line_75mm_never_exceeds_38_chars() {
-        // Regression guard: 75mm=40 caused " [ ]" to split across lines on TM-U220 in practice.
-        // Every formatted line must be ≤ 38 chars so nothing overflows the printer margin.
-        let total_width = char_width("75mm"); // must be 40
+    fn item_line_75mm_never_exceeds_33_chars() {
+        // Regression guard: TM-U220 at 10 cpi normal mode = 33 cols. Every formatted
+        // line must be ≤ 33 chars so the checkbox never overflows to the next line.
+        let total_width = char_width("75mm"); // must be 33
         let items = [
             "2slop signatur",
             "1slop prima kertas",
@@ -405,9 +429,8 @@ mod tests {
 
     #[test]
     fn char_width_75mm() {
-        // TM-U220 (9-pin dot-matrix, 76mm paper): physical max ~40 cols but 40 causes
-        // " [ ]" to overflow in practice, so usable safe width is 38.
-        assert_eq!(char_width("75mm"), 38);
+        // TM-U220 (9-pin dot-matrix, 76mm paper): 10 cpi normal mode = 33 cols.
+        assert_eq!(char_width("75mm"), 33);
     }
 
     #[test]

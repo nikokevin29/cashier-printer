@@ -273,10 +273,11 @@ mod tests {
     #[test]
     fn com_lowercase_routes_to_serial_strategy() {
         // "com..." lowercase prefix also routes to SerialPortDriver
-        let err = dispatch_print("com1", b"\x1b\x40", 9600).unwrap_err();
+        // Use com99 (non-existent) to avoid accidentally matching a real port like COM1.
+        let err = dispatch_print("com99", b"\x1b\x40", 9600).unwrap_err();
         assert!(
             matches!(err, AppError::Print(_)),
-            "expected Print error for com1 path, got: {err:?}"
+            "expected Print error for com99 path, got: {err:?}"
         );
     }
 

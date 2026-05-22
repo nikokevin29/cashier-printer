@@ -12,6 +12,10 @@ pub struct AppSettings {
     pub pc_name: String,
     /// Extra blank lines fed after the receipt (0–5).
     pub extra_feeds: u8,
+    /// Print item lines in bold/emphasized mode for larger appearance.
+    pub bold_items: bool,
+    /// Print item lines at double-width + double-height (one size level up).
+    pub large_font: bool,
 }
 
 pub fn get_setting(conn: &Connection, key: &str) -> Result<String> {
@@ -51,6 +55,14 @@ pub fn get_all_settings(conn: &Connection) -> Result<AppSettings> {
             .and_then(|v| v.parse::<u8>().ok())
             .map(|n| n.min(5))
             .unwrap_or(0),
+        bold_items: get_setting(conn, "bold_items")
+            .ok()
+            .map(|v| v == "true")
+            .unwrap_or(false),
+        large_font: get_setting(conn, "large_font")
+            .ok()
+            .map(|v| v == "true")
+            .unwrap_or(false),
     })
 }
 
@@ -75,6 +87,8 @@ pub fn save_all_settings(conn: &Connection, settings: &AppSettings) -> Result<()
     set_setting(conn, "auto_cut", if settings.auto_cut { "true" } else { "false" })?;
     set_setting(conn, "pc_name", &settings.pc_name)?;
     set_setting(conn, "extra_feeds", &settings.extra_feeds.min(5).to_string())?;
+    set_setting(conn, "bold_items", if settings.bold_items { "true" } else { "false" })?;
+    set_setting(conn, "large_font", if settings.large_font { "true" } else { "false" })?;
     Ok(())
 }
 
@@ -93,7 +107,9 @@ mod tests {
              INSERT INTO settings VALUES ('serial_baud_rate',  '9600');
              INSERT INTO settings VALUES ('auto_cut',          'true');
              INSERT INTO settings VALUES ('pc_name',           '');
-             INSERT INTO settings VALUES ('extra_feeds',       '0');",
+             INSERT INTO settings VALUES ('extra_feeds',       '0');
+             INSERT INTO settings VALUES ('bold_items',        'false');
+             INSERT INTO settings VALUES ('large_font',        'false');",
         )
         .unwrap();
         conn
@@ -142,6 +158,7 @@ mod tests {
         assert_eq!(s.footer_text, "");
         assert_eq!(s.pc_name, "");
         assert_eq!(s.extra_feeds, 0);
+        assert!(!s.bold_items);
     }
 
     #[test]
@@ -156,6 +173,8 @@ mod tests {
             auto_cut: false,
             pc_name: "Kasir 2".to_string(),
             extra_feeds: 3,
+            bold_items: true,
+            large_font: true,
         };
         save_all_settings(&conn, &original).unwrap();
         let loaded = get_all_settings(&conn).unwrap();
@@ -167,6 +186,8 @@ mod tests {
         assert!(!loaded.auto_cut);
         assert_eq!(loaded.pc_name, "Kasir 2");
         assert_eq!(loaded.extra_feeds, 3);
+        assert!(loaded.bold_items);
+        assert!(loaded.large_font);
     }
 
     #[test]
@@ -181,6 +202,8 @@ mod tests {
             auto_cut: true,
             pc_name: String::new(),
             extra_feeds: 99, // over max
+            bold_items: false,
+            large_font: false,
         };
         save_all_settings(&conn, &settings).unwrap();
         let loaded = get_all_settings(&conn).unwrap();
